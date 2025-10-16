@@ -1,13 +1,60 @@
 Задание:
 
 Даны следующие бизнес-сущности и соответствующие им таблицы в базе данных (модель данных реляционная):
-·       Номенклатура (товары) – артикул, категория товара, стоимость _ **items**
-·       Клиенты  – наименование юр.лица, ИНН, ответственный менеджер _ **clients**
-·       Заказы (корзина) – артикул, сумма поартикульно, маржа поартикульно _ **orders**
-·       Реализации (продажи) – сумма продажи поартикульно _ **sales**
-·       Корректировки реализаций (возвраты) – сумма возврата поартикульно _ **refunds**
-·       Плановые показатели по менеджеру – основные показатели из описанных выше сущностей, период - **manager_indicators**
-·       Команды – участники команды (менеджеры) и их руководитель с указанием роли _ **teams**
+·       Номенклатура (товары) – артикул, категория товара, стоимость.
+Таблица items
+- item_id
+- article
+- category
+- price
+
+·       Клиенты  – наименование юр.лица, ИНН, ответственный менеджер.
+Таблица clients
+- client_id
+- name
+- inn
+- manager_id
+
+·       Заказы (корзина) – артикул, сумма поартикульно, маржа поартикульно.
+Таблица orders
+- order_id
+- order_date
+- status
+- client_id
+- item_id
+- quantity
+- amount_price
+- margin (поартикульно)
+
+·       Реализации (продажи) – сумма продажи поартикульно
+Таблица sales
+- sale_id
+- order_id
+- sale_date
+- amount_sales
+
+·       Корректировки реализаций (возвраты) – сумма возврата поартикульно
+Таблица refunds
+- refund_id
+- sale_id
+- refund_date
+- refund_amount
+
+·       Плановые показатели по менеджеру – основные показатели из описанных выше сущностей, период
+Таблица manager_indicators
+- manager_id
+- period
+- revenue_plan
+- margin_plan
+- avg_check_plan
+
+·       Команды – участники команды (менеджеры) и их руководитель с указанием роли
+Таблица manager_teams
+- manager_id
+- team_lead_id
+- name
+- role
+- team_id
  
 Необходимо собрать 2 дашборда для разных ролей: менеджер и руководитель команды по следующим показателям: 
 ·       Выручка
@@ -21,10 +68,163 @@
 Представленная структура данных является исходной и может быть расширена в процессе разработки для полного удовлетворения требований к отчетности
 Для реализации дашбордов необходимо предварительно подготовить SQL запросы на выборку необходимых данных из БД
 
-Витрина Менеджер:
+-- Вьюшка по иерархии -- 
 
-select 
-from 
+create view team_hierarchy_view as
+select
+mt.manager_id,
+mt.name as manager_name,
+mt.team_lead_id,
+mt.role,
+mt.team_id,
+tl.name as team_lead_name
+from manager_teams as mt
+left join manager_teams as tl on mt.team_lead_id = tl.manager_id;
 
+-- Вьюшка факт продажи и возвраты. Маржу посчитала "вручную" по принципу того, что может быть неполный возврат заказа или факт оплаты будет отличаться от факта заказа и в процессе могла появится скидка по товару --
 
-Витрина Руководитель команды:
+create view sales_facts_view as
+with sales_facts as (select
+s.sale_date,
+to_char(s.sale_date, 'YYYYQ') as period,
+c.manager_id,
+c.client_id,
+i.item_id,
+i.article,
+i.category,
+s.amount_sales as revenue,
+(s.amount_sales - (o.quantity * i.price)) as margin
+from sales as s 
+join orders as o on s.order_id = o.order_id
+join clients as c on o.client_id = c.client_id
+join items as i on o.item_id = i.item_id
+where o.status = 'Выполнено'),
+
+refunds_facts as (select
+r.refund_date as sale_date,
+to_char(r.refund_date, 'YYYYQ') as period,
+c.manager_id,
+c.client_id,
+i.item_id,
+i.article,
+i.category,
+-r.refund_amount as revenue,
+-(r.refund_amount -
+((r.refund_amount / NULLIF(o.amount_price, 0)) * 
+o.quantity * i.price)) as margin
+from refunds as r
+join sales as s on r.sale_id = s.sale_id
+join orders as o on s.order_id = o.order_id
+join clients as c on o.client_id = c.client_id
+join items as i on o.item_id = i.item_id)
+
+select * from sales_facts
+union all
+select * from refunds_facts;
+
+-- План-факт менеджеры выручка, маржа, ср. чек --
+
+create view manager_kpi_view as
+with fact_table as (
+select
+period,
+manager_id,
+sum(revenue) as revenue_fact,
+sum(margin) as margin_fact,
+count(distinct client_id) as client_count,
+sum(revenue) / nullif(count(distinct client_id), 0) as avg_check_fact
+from sales_facts_view
+group by period, manager_id
+)
+
+select
+ft.period,
+ft.manager_id,
+th.manager_name,
+th.team_lead_name,
+th.team_id,
+ft.revenue_fact,
+ft.margin_fact,
+coalesce(f.revenue_fact, 0) as revenue_fact,
+coalesce(f.margin_fact, 0) as margin_fact,
+coalesce(f.avg_check_fact, 0) as avg_check_fact,
+coalesce(mi.revenue_plan, 0) as revenue_plan,
+coalesce(mi.margin_plan, 0) as margin_plan,
+coalesce(mi.avg_check_plan, 0) as avg_check_plan,
+case
+when coalesce(mi.revenue_plan, 0) > 0
+then round(ft.revenue_fact / mi.revenue_plan * 100, 2)
+else 0
+end as revenue_percent,
+case
+when coalesce(mi.margin_plan, 0) > 0
+then round(ft.margin_fact / mi.margin_plan * 100, 2)
+else 0
+end as margin_percent
+case
+when coalesce(mi.avg_check_plan, 0) > 0
+then round(ft.avg_check_fact / mi.avg_check_plan * 100, 2)
+else 0
+end as avg_check_percent
+from fact_table as ft
+join team_hierarchy_view as th on ft.manager_id = th.manager_id
+left join manager_indicators as mi on ft.manager_id = mi.manager_id and ft.period = mi.period
+where th.role = 'Менеджер';
+
+-- План-факт руководители выручка, маржа, ср. чек --
+
+create view team_lead_kpi_view as
+select
+mkv.period,
+th.team_lead_id,
+th.team_lead_name,
+count(distinct th.manager_id) as team_size,
+sum(mkv.revenue_fact) as team_revenue_fact,
+sum(mkv.margin_fact) as team_margin_fact,
+avg(mkv.avg_check_fact) as team_avg_check_fact,
+sum(mi.revenue_plan) as team_revenue_plan,
+sum(mi.margin_plan) as team_margin_plan,
+avg(mi.avg_check_plan) as team_avg_check_plan,
+round(sum(mkv.revenue_fact) / nullif(sum(mi.revenue_plan), 0) * 100, 2) as revenue_percent,
+round(sum(mkv.margin_fact) / nullif(sum(mi.margin_plan), 0) * 100, 2) as margin_percent,
+round(sum(mkv.avg_check_fact) / nullif(sum(mi.avg_check_plan), 0) * 100, 2) as avg_check_percent
+from manager_kpi_view as mkv
+join team_hierarchy_view as th on mkv.manager_id = th.manager_id
+left join manager_indicators as mi on mkv.manager_id = mi.manager_id and mkv.period = mi.period
+where th.team_lead_id is not null
+group by mkv.period, mkv.team_lead_id, mkv.team_lead_name)
+
+select
+period,
+team_lead_id,
+team_lead_name,
+team_size,
+team_revenue_fact,
+team_margin_fact,
+team_avg_check_fact,
+team_revenue_plan,
+team_margin_plan,
+team_avg_check_plan,
+revenue_percent,
+margin_percent,
+avg_check_percent
+from team_leaD_kpi_view;
+order by period, team_lead_name, team_revenue_fact;
+
+-- Выручка по категориям и артикулам --
+
+create view sales_by_category_article as
+select sfv.period,
+sfv.manager_id,
+th.manager_name,
+th.team_lead_name,
+th.team_id,
+i.category,
+i.article,
+sum(sfv.revenue) as revenue_fact,
+sum(sfv.mergin) as merge_fact
+from sales_facts_view as sfv
+join items as i on sfv.item_id = i.item_id
+join team_hierarchy_view th on sfv.manager_id = th.manager_id
+group by sfv.period, sfv.manager_idm th.manager_name, th.team_lead_name, th_team_id, i.category, i.article;
+
